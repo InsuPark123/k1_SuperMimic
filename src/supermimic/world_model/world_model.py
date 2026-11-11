@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from supermimic.world_model.dynamics import MLP, DynamicsMLP
 from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame
 from supermimic.world_model.state_spec import StateSpec, StateSpecCfg
+from supermimic.robot import NJ, STATE_DIM, XI_DIM
 
 
 @dataclass
@@ -42,7 +43,7 @@ class WorldModel(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.spec = StateSpec(cfg.state_spec, device)
-        self.dynamics = DynamicsMLP(hidden=cfg.hidden)
+        self.dynamics = DynamicsMLP(feat_dim=STATE_DIM, act_dim=NJ, xi_dim=XI_DIM, out_dim=12+2*NJ, hidden=cfg.hidden)
         self.term_head = TerminationHead(cfg.term_hidden, cfg.height_threshold, cfg.tilt_threshold)
         self.heads = heads  # analytic observation / reward / FK (no parameters)
         self.to(device)

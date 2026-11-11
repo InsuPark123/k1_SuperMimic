@@ -2,6 +2,8 @@
 
 An independent, from-scratch reproduction of **SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World Model** ([arXiv:2610.28480](https://arxiv.org/abs/2610.28480), CoRL 2026) for the Unitree G1, built on [mjlab](https://github.com/mujocolab/mjlab) / MuJoCo Warp. No official code is released; everything here (motion library, differentiable FK, world model, BPTT trainer, return-based reset sampling, data-parallel training, Appendix-F benchmark) is implemented from the paper.
 
+For experimental 23-joint K1 Rev.1 support and motion conversion, see [docs/K1.md](docs/K1.md).
+
 ![G1 policy tracking BONES-SEED motions](media/g1_boneseed_highlights.gif)
 
 *One policy, trained with the paper's observation layout on the full BONES-SEED set (129.9k clips) in 7.1 h on 4×RTX 5090. Solid robot: the policy in simulation (MuJoCo Warp, deterministic Appendix-F protocol). Blue ghost: the reference motion. Clips: high jump, getting up from lying face-down, 360° spin, one-leg hopping, a jog into a 270° turning jump and a drop to a crawl, inchworm. A longer cut with 18 motions (also dance turns, frog jumps, push-ups, kneeling, moonwalk, …) is in [`media/g1_boneseed_showcase.mp4`](media/g1_boneseed_showcase.mp4).*

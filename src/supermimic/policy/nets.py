@@ -10,9 +10,11 @@ import torch.nn as nn
 from supermimic.world_model.dynamics import MLP
 from supermimic.world_model.heads import OBS_TERMS
 
-GOAL_DIM = 680
+from supermimic.robot import NJ, STATE_DIM, XI_DIM, GOAL_FEAT_DIM
+
+GOAL_DIM = 10 * GOAL_FEAT_DIM
 LATENT_DIM = 32
-ACT_DIM = 29
+ACT_DIM = NJ
 
 
 @dataclass
@@ -42,9 +44,9 @@ def _obs_scale_vector(cfg: PolicyCfg) -> torch.Tensor:
 
 
 def _goal_scale_vector(cfg: PolicyCfg, goal_dim: int) -> torch.Tensor:
-    sizes = (29, 29, 3, 3, 3, 1)
+    sizes = (NJ, NJ, 3, 3, 3, 1)
     per_frame = torch.cat([torch.full((n,), 1.0 / s) for n, s in zip(sizes, cfg.goal_term_scale)])
-    k, extra = divmod(goal_dim, 68)
+    k, extra = divmod(goal_dim, GOAL_FEAT_DIM)
     return torch.cat([per_frame.repeat(k), torch.ones(extra)])
 
 
@@ -60,7 +62,7 @@ class MotionEncoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, cfg: PolicyCfg, obs_dim: int = 930):
+    def __init__(self, cfg: PolicyCfg, obs_dim: int = 10 * (3 * NJ + 6)):
         super().__init__()
         self.mlp = MLP(cfg.latent_dim + obs_dim, cfg.decoder_hidden, ACT_DIM, last_gain=cfg.decoder_last_gain)
         self.register_buffer("scale", _obs_scale_vector(cfg))
@@ -85,7 +87,7 @@ class Policy(nn.Module):
 class Critic(nn.Module):
     """V(canonical state 71, goal 680, xi 33, root error 4) -> scalar (one per interface)."""
 
-    def __init__(self, cfg: CriticCfg, feat_dim: int = 71, goal_dim: int | None = None, xi_dim: int = 33, pcfg: PolicyCfg | None = None):
+    def __init__(self, cfg: CriticCfg, feat_dim: int = STATE_DIM, goal_dim: int | None = None, xi_dim: int = XI_DIM, pcfg: PolicyCfg | None = None):
         super().__init__()
         pcfg = pcfg or PolicyCfg()
         goal_dim = goal_dim or pcfg.goal_dim

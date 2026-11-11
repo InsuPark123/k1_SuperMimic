@@ -6,7 +6,8 @@
 The grey/blue translucent robot is the reference pose; the solid robot is the policy.
 Deterministic evaluation settings (no noise, no DR); every reset starts the clip from its first frame.
 Native MuJoCo viewer when a display is available, otherwise viser (browser, http://localhost:8080).
-Keys (native): space pause, right-arrow single step, +/- speed, backspace reset.
+Keys (native): [ / ] previous / next motion, Enter reset, space pause,
+right-arrow single step, +/- speed.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import torch
 import tyro
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from mjlab.viewer.base import ViewerAction
+from mjlab.viewer.native.keys import KEY_LEFT_BRACKET, KEY_RIGHT_BRACKET
 
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
@@ -34,6 +37,37 @@ class _DictPolicy:
     @torch.no_grad()
     def __call__(self, obs):
         return self.policy(obs["policy"], obs["goal"])
+
+
+class MotionViewer(NativeMujocoViewer):
+    """Switch clips on the simulation thread when the viewer receives a key."""
+
+    def __init__(self, env, policy):
+        super().__init__(env, policy, key_callback=self.on_key)
+        self.motion = env.unwrapped.command_manager.get_term("motion")
+        self.clip_index = 0
+        self.select_clip(0)
+        print("[INFO] Use [ and ] to switch motions; Enter restarts the current motion.")
+
+    def on_key(self, key: int) -> None:
+        if key == KEY_LEFT_BRACKET:
+            self.request_action("CUSTOM", -1)
+        elif key == KEY_RIGHT_BRACKET:
+            self.request_action("CUSTOM", 1)
+
+    def select_clip(self, index: int) -> None:
+        clips = self.motion.library.clips
+        self.clip_index = index % len(clips)
+        clip = clips[self.clip_index]
+        self.motion.forced_frame[:] = clip.start
+        self.reset_environment()
+        print(f"[INFO] Motion {self.clip_index + 1}/{len(clips)}: {clip.name}", flush=True)
+
+    def _handle_custom_action(self, action, payload):
+        if action == ViewerAction.CUSTOM and payload in (-1, 1):
+            self.select_clip(self.clip_index + payload)
+            return True
+        return super()._handle_custom_action(action, payload)
 
 
 def main(
@@ -70,7 +104,7 @@ def main(
     print(f"[INFO] {len(files)} clip(s), {num_envs} env(s), viewer={viewer}")
     try:
         if viewer == "native":
-            NativeMujocoViewer(env, pol).run()
+            MotionViewer(env, pol).run()
         else:
             ViserPlayViewer(env, pol).run()
     finally:

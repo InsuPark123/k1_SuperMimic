@@ -32,6 +32,8 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
+from supermimic.robot import ROBOT
+
 G1_JOINT_NAMES: tuple[str, ...] = (
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
@@ -63,13 +65,28 @@ G1_JOINT_NAMES: tuple[str, ...] = (
     "right_wrist_pitch_joint",
     "right_wrist_yaw_joint",
 )
-NUM_JOINTS = len(G1_JOINT_NAMES)
+K1_JOINT_NAMES = tuple(n for n in G1_JOINT_NAMES if n not in ("waist_roll_joint", "waist_pitch_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint"))
+JOINT_NAMES = K1_JOINT_NAMES if ROBOT == "k1" else G1_JOINT_NAMES
+NUM_JOINTS = len(JOINT_NAMES)
 
 
 def g1_xml_path() -> Path:
     import mjlab
 
     return Path(mjlab.__file__).parent / "asset_zoo/robots/unitree_g1/xmls/g1.xml"
+
+
+def load_k1_model() -> mujoco.MjModel:
+    path = Path(__file__).resolve().parents[3] / "third_party/ai_sapiens/ai_sapiens_description/mujoco/k1/k1.xml"
+    model = mujoco.MjModel.from_xml_path(str(path))
+    names = tuple(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(1, model.njnt))
+    if names != K1_JOINT_NAMES or (model.nq, model.nv) != (30, 29):
+        raise ValueError("K1 model joint order or dimensions do not match the motion format")
+    return model
+
+
+def load_robot_model():
+    return load_k1_model() if ROBOT == "k1" else load_g1_model()
 
 
 def load_g1_model(xml_path: str | Path | None = None) -> mujoco.MjModel:
@@ -163,6 +180,8 @@ def load_csv(path: str | Path) -> np.ndarray:
     import pandas as pd
 
     if csv_format(path) == "bones":
+        if ROBOT == "k1":
+            raise ValueError("BONES-SEED G1 CSVs cannot be used as K1 motion references")
         # BONES-SEED G1 CSV (same parsing as SONIC's convert_soma_csv_to_motion_lib.py):
         # centimeters -> metres, Euler 'xyz' degrees -> quaternion, joint degrees -> radians.
         df = pd.read_csv(path)
@@ -177,7 +196,15 @@ def load_csv(path: str | Path) -> np.ndarray:
         joints = np.deg2rad(df[joint_cols].to_numpy(np.float64))
         arr = np.concatenate([pos, quat_xyzw, joints], axis=1)
     else:
-        arr = pd.read_csv(path, header=None, dtype=np.float64).to_numpy()
+        with open(path) as f:
+            first_line = f.readline()
+        header = 0 if ROBOT == "k1" and first_line.startswith("root_pos_x,") else None
+        df = pd.read_csv(path, header=header, dtype=np.float64)
+        if header == 0:
+            expected = ["root_pos_x", "root_pos_y", "root_pos_z", "root_quat_x", "root_quat_y", "root_quat_z", "root_quat_w", *K1_JOINT_NAMES]
+            if list(df.columns) != expected:
+                raise ValueError(f"{path}: K1 CSV header does not match the expected joint order")
+        arr = df.to_numpy()
     if arr.ndim != 2 or arr.shape[1] != 7 + NUM_JOINTS:
         raise ValueError(f"{path}: expected (N, {7 + NUM_JOINTS}) got {arr.shape}")
     return arr
@@ -312,7 +339,7 @@ def convert_csv_to_npz(
     model: mujoco.MjModel | None = None,
 ) -> dict:
     """Convert one CSV to an mjlab-compatible npz. Returns a small summary dict."""
-    model = model or load_g1_model()
+    model = model or load_robot_model()
     raw = load_csv(csv_path)
     motion = resample_motion(raw, input_fps, output_fps)
     bodies = forward_kinematics(model, motion)
@@ -327,7 +354,7 @@ def convert_csv_to_npz(
         body_quat_w=bodies.quat_w.astype(np.float32),
         body_lin_vel_w=bodies.lin_vel_w.astype(np.float32),
         body_ang_vel_w=bodies.ang_vel_w.astype(np.float32),
-        joint_names=np.array(G1_JOINT_NAMES),
+        joint_names=np.array(JOINT_NAMES),
         body_names=np.array(bodies.body_names),
         source=np.array(str(csv_path)),
         input_fps=np.array([input_fps], dtype=np.float32),

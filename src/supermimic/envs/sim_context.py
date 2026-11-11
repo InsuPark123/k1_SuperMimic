@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-XI_DIM = 33
+from supermimic.robot import XI_DIM
 
 
 class SimContext:

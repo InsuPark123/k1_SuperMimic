@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import torch
 
-STATE_DIM = 36 + 35
-NQ = 36
-NV = 35
+from supermimic.robot import STATE_DIM, NQ, NV
 
 
 class StateIO:

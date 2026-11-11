@@ -31,6 +31,7 @@ from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
+from supermimic.robot import ROBOT
 from supermimic.data.recorder import ReplayRecorderCfg
 from supermimic.envs.actions import NoisyJointPositionActionCfg
 from supermimic.envs.mdp import observations as sm_obs
@@ -62,9 +63,13 @@ TRACKED_BODIES = (
     "right_elbow_link",
     "right_wrist_yaw_link",
 )
+if ROBOT == "k1":
+    from supermimic.envs.k1_config import get_k1_rev1_cfg, K1_REV1_ACTION_SCALE, K1_REV1_FOOT_COLLISION_GEOM_PATTERN
+    TRACKED_BODIES = tuple(n.replace("wrist_yaw_link", "wrist_roll_rubber_hand") for n in TRACKED_BODIES)
+
 ANCHOR_BODY = "torso_link"
 ROOT_BODY = "pelvis"
-FOOT_GEOM_REGEX = r"^(left|right)_foot[1-7]_collision$"
+FOOT_GEOM_REGEX = K1_REV1_FOOT_COLLISION_GEOM_PATTERN if ROBOT == "k1" else r"^(left|right)_foot[1-7]_collision$"
 
 
 @dataclass
@@ -132,7 +137,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         "joint_pos": NoisyJointPositionActionCfg(
             entity_name="robot",
             actuator_names=(".*",),
-            scale=G1_ACTION_SCALE,
+            scale=K1_REV1_ACTION_SCALE if ROBOT == "k1" else G1_ACTION_SCALE,
             use_default_offset=True,
             noise_std=a.action_noise_std,
         )
@@ -225,7 +230,7 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         recorders["replay"] = ReplayRecorderCfg(params={"capacity": a.replay_capacity, "foot_geom_regex": FOOT_GEOM_REGEX, "com_body_name": "torso_link"})
 
     cfg = ManagerBasedRlEnvCfg(
-        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": get_g1_robot_cfg()}),
+        scene=SceneCfg(terrain=TerrainEntityCfg(terrain_type="plane"), num_envs=a.num_envs, entities={"robot": get_k1_rev1_cfg() if ROBOT == "k1" else get_g1_robot_cfg()}),
         observations=observations,
         actions=actions,
         commands=commands,

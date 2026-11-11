@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
+from supermimic.robot import NJ
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.compiled import REWARD_TERM_NAMES, ImagStep
@@ -15,7 +16,7 @@ from supermimic.world_model.wm_trainer import reference_at
 from supermimic.world_model.world_model import WorldModel
 
 # Paper Table A.1 sensor noise (uniform half-widths) in the 93-d observation order.
-OBS_NOISE_HALF = torch.tensor([0.01] * 29 + [0.5] * 29 + [0.2] * 3 + [0.05] * 3 + [0.0] * 29)
+OBS_NOISE_HALF = torch.tensor([0.01] * NJ + [0.5] * NJ + [0.2] * 3 + [0.05] * 3 + [0.0] * NJ)
 ANCHOR_NOISE_HALF = torch.tensor([0.25] * 3 + [0.05] * 6)
 
 

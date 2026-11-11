@@ -15,6 +15,7 @@ from pathlib import Path
 
 import torch
 
+from supermimic.robot import ROBOT
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.policy.nets import Policy, PolicyCfg
 
@@ -32,6 +33,8 @@ class ClipResult:
 
 def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, dict]:
     ck = torch.load(path, map_location=device, weights_only=False)
+    if ck.get("robot", "g1") != ROBOT:
+        raise ValueError(f"Checkpoint robot {ck.get('robot', 'g1')!r} does not match {ROBOT!r}")
     pc = ck["config"]["policy"]
     pcfg = PolicyCfg(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in pc.items()})
     policy = Policy(pcfg).to(device)

@@ -17,14 +17,16 @@ from supermimic.envs.mdp.rewards import TrackingRewardCfg, tracking_reward_terms
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.kinematics.rotations import projected_gravity, quat_apply_inverse
 
-OBS_DIM = 93
+from supermimic.robot import NJ, NQ
+
+OBS_DIM = 3 * NJ + 6
 # Term layout of the ``policy`` observation group (order matters: term-major history).
-OBS_TERMS = (("joint_pos", 29), ("joint_vel", 29), ("base_ang_vel", 3), ("projected_gravity", 3), ("actions", 29))
+OBS_TERMS = (("joint_pos", NJ), ("joint_vel", NJ), ("base_ang_vel", 3), ("projected_gravity", 3), ("actions", NJ))
 
 
 def split_state(s: torch.Tensor):
     """-> root_pos (…,3), root_quat (…,4), joint_pos (…,29), root_lin_vel_w (…,3), root_ang_vel_b (…,3), joint_vel (…,29)."""
-    return s[..., 0:3], s[..., 3:7], s[..., 7:36], s[..., 36:39], s[..., 39:42], s[..., 42:71]
+    return s[..., 0:3], s[..., 3:7], s[..., 7:NQ], s[..., NQ:NQ+3], s[..., NQ+3:NQ+6], s[..., NQ+6:]
 
 
 def analytic_observation(
@@ -35,7 +37,7 @@ def analytic_observation(
     xi[..., 1:30] is the encoder bias: observed joint positions are ``q + bias - q0``.
     """
     _, root_quat, q, _, ang_b, qd = split_state(s)
-    bias = xi[..., 1:30]
+    bias = xi[..., 1:1+NJ]
     return torch.cat([q + bias - default_joint_pos, qd, ang_b, projected_gravity(root_quat), prev_action], dim=-1)
 
 
@@ -99,7 +101,7 @@ class AnalyticHeads:
         self.reward_cfg = reward_cfg or TrackingRewardCfg()
 
     def robot_bodies(self, s: torch.Tensor) -> dict[str, torch.Tensor]:
-        out = self.fk(s[..., :36], s[..., 36:])
+        out = self.fk(s[..., :NQ], s[..., NQ:])
         idx = self.tracked_idx
         return {
             "pos": out["pos"][..., idx, :],
@@ -125,7 +127,7 @@ class AnalyticHeads:
             anchor_index=self.anchor_index,
             action=action,
             prev_action=prev_action,
-            joint_pos=s_next[..., 7:36],
+            joint_pos=s_next[..., 7:NQ],
             soft_limits=self.soft_limits,
             cfg=self.reward_cfg,
         )
