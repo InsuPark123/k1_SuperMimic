@@ -26,6 +26,7 @@ from mjlab.viewer.native.keys import KEY_LEFT_BRACKET, KEY_RIGHT_BRACKET
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
 from supermimic.eval.benchmark import load_policy_from_checkpoint
+from supermimic.robot import ROBOT
 
 
 class _DictPolicy:
@@ -79,9 +80,23 @@ def main(
     viewer: Literal["auto", "native", "viser"] = "auto",
     ghost: bool = True,
     sampling: Literal["start", "uniform"] = "start",
+    export_only: bool = False,
 ) -> None:
     files = [str(f) for f in discover_npz(npz_dir, names=clips)]
     policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    if ROBOT == 'k1':
+        from supermimic.deployment import export_k1_policy, prepare_k1_params
+        data = cfg['data']
+        if data.get('library'):
+            raise ValueError('K1 automatic export requires individual training NPZ files')
+        training_files = discover_npz(data['npz_dir'], limit=data.get('limit'), names=data.get('clips'), manifest=data.get('manifest'))
+        prepare_k1_params(ckpt.parent, cfg, training_files)
+        onnx_path = export_k1_policy(ckpt.parent, ckpt, policy, cfg)
+        print(f'[INFO] Exported research-draft actor: {onnx_path} (not robot-deployable)', flush=True)
+    if export_only:
+        if ROBOT != 'k1':
+            raise ValueError('--export-only is currently available for K1 checkpoints')
+        return
     args = SuperMimicEnvCfgArgs(
         npz_files=files,
         num_envs=num_envs,
@@ -95,6 +110,7 @@ def main(
         record_transitions=False,
         seed=0,
         anchor_obs=cfg["env"].get("anchor_obs", False),
+        anchor_ori_obs=cfg["env"].get("anchor_ori_obs", False),
         debug_vis=ghost,
     )
     env = RslRlVecEnvWrapper(make_env(args, device=device))

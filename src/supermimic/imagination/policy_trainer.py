@@ -35,6 +35,9 @@ class PolicyTrainerCfg:
     obs_noise: bool = True
     compile: str | None = "default"
     anchor_obs: bool = False  # None | "default" | "reduce-overhead" | "max-autotune-no-cudagraphs"
+    anchor_ori_obs: bool = False
+    imu_pitch_offset_deg: float = 0.0
+    imu_roll_offset_deg: float = 0.0
 
 
 class PolicyTrainer:
@@ -60,15 +63,15 @@ class PolicyTrainer:
     def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
         cfg = self.cfg
         start = buffer.sample_starts(cfg.batch_size, cfg.history)
-        xi_norm = self.wm.spec.normalize_xi(start.xi)
 
         # ---- actor: BPTT through the frozen world model ------------------------------------
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
-        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
+        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs, anchor_ori_obs=cfg.anchor_ori_obs, imu_pitch_offset_deg=cfg.imu_pitch_offset_deg, imu_roll_offset_deg=cfg.imu_roll_offset_deg)
+        xi_norm = self.wm.spec.normalize_xi(ro.contexts)
         feat, goals, e_root = self._critic_inputs(ro)
         if cfg.use_critic:
-            v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])
+            v_H = self.critic(feat[-1], goals[-1], xi_norm[-1], e_root[-1])
         else:
             v_H = None
         J = policy_objective(ro, v_H, cfg.gamma)
@@ -99,7 +102,7 @@ class PolicyTrainer:
             with torch.no_grad():
                 feat_d, goals_d, e_root_d = feat.detach(), goals.detach(), e_root.detach()
                 H1, n, _ = feat_d.shape
-                xi_rep = xi_norm[None].expand(H1, n, -1)
+                xi_rep = xi_norm.detach()
                 values = self.critic(feat_d.reshape(H1 * n, -1), goals_d.reshape(H1 * n, -1), xi_rep.reshape(H1 * n, -1), e_root_d.reshape(H1 * n, -1)).reshape(H1, n)
                 targets = gae_targets(ro.rewards.detach(), ro.dhat[1:].detach(), values, cfg.gamma, cfg.gae_lambda)  # (H, n)
                 X_feat = feat_d[:-1].reshape(-1, feat_d.shape[-1])

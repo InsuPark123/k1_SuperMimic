@@ -280,6 +280,15 @@ class MultiClipMotionCommand(CommandTerm):
         root_state = torch.cat([root_pos, root_ori, root_lin_vel, root_ang_vel], dim=-1)
         self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
         self.robot.reset(env_ids=env_ids)
+        # The command reset runs after reset events and clears actuator delay
+        # buffers. Restore the lag sampled by the current episode's event.
+        if hasattr(self._env, 'motor_delay_lag'):
+            # Backfill the delay buffer with the target represented by the
+            # recorded zero previous action, including the encoder-bias correction.
+            initial_target = self.robot.data.default_joint_pos[env_ids] - self.robot.data.encoder_bias[env_ids]
+            self.robot.set_joint_position_target(initial_target, env_ids=env_ids)
+            for actuator in self.robot.actuators:
+                actuator.set_lags(self._env.motor_delay_lag[env_ids], env_ids)
 
     def _resample_command(self, env_ids: torch.Tensor):
         # Episode bookkeeping for the envs being reset (terminal reward is already in reward_buf).

@@ -11,11 +11,12 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from supermimic.config import TrainConfig
-from supermimic.data.motion_convert import load_robot_model
-from supermimic.robot import GOAL_FEAT_DIM, ROBOT
+from supermimic.data.motion_convert import load_robot_model, K1_JOINT_NAMES
+from supermimic.robot import GOAL_FEAT_DIM, NJ, ROBOT
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BODIES
+from supermimic.envs.mdp.rewards import TrackingRewardCfg
+from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BODIES, K1_LEG_FRICTION
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, Policy
@@ -26,13 +27,59 @@ from supermimic.world_model.wm_trainer import WorldModelTrainer
 from supermimic.world_model.world_model import WorldModel
 
 
+def configure_encoder_bias(cfg: TrainConfig) -> None:
+    half_range = cfg.env.encoder_bias_range
+    other = cfg.env.encoder_bias_other_range
+    if not 0 < half_range < float('inf') or not 0 < other < float('inf'):
+        raise ValueError('encoder bias half-range must be positive and finite')
+    spec = cfg.world_model.state_spec
+    scales = spec.xi_scale
+    bias_scales = (half_range,) * 12 + (other,) * (NJ - 12) if ROBOT == 'k1' else (half_range,) * NJ
+    spec.xi_scale = scales[:1] + bias_scales + scales[1 + NJ:]
+    if cfg.env.k1_system_id_dr:
+        if ROBOT != 'k1' or not cfg.env.domain_randomization:
+            raise ValueError('K1 system-ID randomization requires K1 and domain randomization')
+    if cfg.env.extended_dr_context and not cfg.env.k1_system_id_dr:
+        raise ValueError('Extended DR context requires K1 system-ID randomization')
+    if cfg.env.k1_legacy_friction_delay_dr and not cfg.env.k1_system_id_dr:
+        raise ValueError('Legacy friction and delay randomization requires K1 system-ID randomization')
+    if cfg.env.motor_delay_dr and not cfg.env.k1_system_id_dr:
+        raise ValueError('Motor delay randomization requires K1 system-ID randomization')
+    if cfg.env.extended_dr_context and not cfg.env.k1_legacy_friction_delay_dr:
+        raise ValueError('Extended DR context requires legacy friction and delay randomization')
+    if cfg.env.extended_dr_context:
+        if len(spec.xi_scale) != NJ + 4:
+            raise ValueError('Unexpected base world-model context dimensions')
+        bounds = [K1_LEG_FRICTION[name] for name in K1_JOINT_NAMES[:12]]
+        spec.xi_offset += tuple((lo + hi) / 2 for lo, hi in bounds) + (1.,) * (2 * NJ) + (0.95,) * NJ + (2.,) + (0.,) * NJ
+        spec.xi_scale += tuple((hi - lo) / 2 for lo, hi in bounds) + (0.1,) * (2 * NJ) + (0.05,) * NJ + (2.,) + (1.,) * NJ
+    if cfg.resume is not None:
+        ck = torch.load(cfg.resume, map_location='cpu', weights_only=False)
+        old = ck['config']['world_model']['state_spec']['xi_scale'][1:1 + NJ]
+        if any(abs(value - target) > 1e-9 for value, target in zip(old, bias_scales)):
+            raise ValueError('Encoder bias range differs from the checkpoint world-model normalization; start a new run or use the checkpoint range.')
+        saved_spec = ck['config']['world_model']['state_spec']
+        if (len(saved_spec['xi_scale']) != len(spec.xi_scale) or len(saved_spec['xi_offset']) != len(spec.xi_offset) or
+            any(abs(a - b) > 1e-9 for a, b in zip(saved_spec['xi_scale'], spec.xi_scale)) or
+            any(abs(a - b) > 1e-9 for a, b in zip(saved_spec['xi_offset'], spec.xi_offset))):
+            raise ValueError('Checkpoint world-model context differs from the requested domain randomization; start a new run.')
+
+
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
-        cfg.policy.goal_dim = cfg.env.future_frames * GOAL_FEAT_DIM + (9 if cfg.env.anchor_obs else 0)
+        configure_encoder_bias(cfg)
+        if cfg.env.anchor_obs and cfg.env.anchor_ori_obs:
+            raise ValueError('anchor_obs and anchor_ori_obs are mutually exclusive')
+        cfg.policy.goal_dim = cfg.env.future_frames * GOAL_FEAT_DIM + (9 if cfg.env.anchor_obs else 6 if cfg.env.anchor_ori_obs else 0)
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
+        cfg.policy_trainer.anchor_ori_obs = cfg.env.anchor_ori_obs
+        cfg.policy_trainer.imu_pitch_offset_deg = cfg.env.imu_pitch_offset_deg
+        cfg.policy_trainer.imu_roll_offset_deg = cfg.env.imu_roll_offset_deg
         self.rank, local_rank, self.world = init_distributed()
         self.is_main = self.rank == 0
+        if self.world > 1 and cfg.env.self_collision_weight:
+            raise ValueError('Self-collision predictor currently supports one GPU only')
         if self.world > 1:
             cfg.device = f"cuda:{local_rank}"
             # Paper: lr x sqrt(2) for 2 GPUs (each GPU keeps its own 4096 envs and buffer).
@@ -43,8 +90,6 @@ class Trainer:
         self.device = cfg.device
         self.log_dir = Path(cfg.log_root) / cfg.run_name
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        if self.is_main:
-            (self.log_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, default=str))
         self.writer = SummaryWriter(str(self.log_dir / "tb")) if self.is_main else None
 
         if cfg.data.library is not None:
@@ -54,6 +99,12 @@ class Trainer:
             files = discover_npz(cfg.data.npz_dir, limit=cfg.data.limit, names=cfg.data.clips, manifest=cfg.data.manifest)
         if not files:
             raise FileNotFoundError(f"no clips under {cfg.data.npz_dir}")
+        if self.is_main and ROBOT == 'k1':
+            from supermimic.deployment import prepare_k1_params
+            params_dir = prepare_k1_params(self.log_dir, cfg, files)
+            print(f'[INFO] K1 research-draft parameters: {params_dir} (not robot-deployable)')
+        if self.is_main:
+            (self.log_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, default=str))
         self.env = make_env(
             SuperMimicEnvCfgArgs(
                 npz_files=[str(f) for f in files],
@@ -64,10 +115,24 @@ class Trainer:
                 obs_noise=cfg.env.obs_noise,
                 reset_noise=cfg.env.reset_noise,
                 domain_randomization=cfg.env.domain_randomization,
+                encoder_bias_range=cfg.env.encoder_bias_range,
+                encoder_bias_other_range=cfg.env.encoder_bias_other_range,
+                k1_system_id_dr=cfg.env.k1_system_id_dr,
+                k1_legacy_friction_delay_dr=cfg.env.k1_legacy_friction_delay_dr,
+                motor_delay_dr=cfg.env.motor_delay_dr,
+                self_collision_weight=cfg.env.self_collision_weight,
+                extended_dr_context=cfg.env.extended_dr_context,
                 sampling_mode=cfg.env.sampling_mode,
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
+                anchor_ori_obs=cfg.env.anchor_ori_obs,
+                imu_pitch_offset_deg=cfg.env.imu_pitch_offset_deg,
+                imu_roll_offset_deg=cfg.env.imu_roll_offset_deg,
+                base_xy_weight=cfg.env.base_xy_weight,
+                base_yaw_weight=cfg.env.base_yaw_weight,
+                base_xy_std=cfg.env.base_xy_std,
+                base_yaw_std=cfg.env.base_yaw_std,
                 seed=cfg.seed + 1000 * self.rank,
             ),
             device=self.device,
@@ -80,10 +145,12 @@ class Trainer:
         robot = env.scene["robot"]
 
         fk = G1Kinematics(load_robot_model(), device=self.device)
-        heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
-        self.wm = WorldModel(cfg.world_model, heads, self.device)
+        reward_cfg = TrackingRewardCfg(w_base_xy=cfg.env.base_xy_weight, w_base_yaw=cfg.env.base_yaw_weight,
+                                       std_base_xy=cfg.env.base_xy_std, std_base_yaw=cfg.env.base_yaw_std)
+        heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone(), reward_cfg=reward_cfg)
+        self.wm = WorldModel(cfg.world_model, heads, self.device, self_collision_weight=cfg.env.self_collision_weight)
         self.policy = Policy(cfg.policy).to(self.device)
-        self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)
+        self.critic = Critic(cfg.critic, xi_dim=len(cfg.world_model.state_spec.xi_scale), pcfg=cfg.policy).to(self.device)
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
@@ -117,6 +184,7 @@ class Trainer:
                 "policy": self.policy.state_dict(),
                 "critic": self.critic.state_dict(),
                 "wm_opt": self.wm_trainer.opt.state_dict(),
+                "collision_opt": self.wm_trainer.collision_opt.state_dict() if self.wm_trainer.collision_opt is not None else None,
                 "policy_opt": self.policy_trainer.opt.state_dict(),
                 "critic_opt": self.policy_trainer.critic_opt.state_dict(),
                 "bin_return": self.command.bin_return,
@@ -130,10 +198,14 @@ class Trainer:
         ck = torch.load(path, map_location=self.device, weights_only=False)
         if ck.get("robot", "g1") != ROBOT:
             raise ValueError(f"Checkpoint robot {ck.get('robot', 'g1')!r} does not match {ROBOT!r}")
-        self.wm.load_state_dict(ck["wm"])
+        missing, unexpected = self.wm.load_state_dict(ck["wm"], strict=False)
+        if unexpected or any(not k.startswith('collision_head.') for k in missing):
+            raise ValueError(f'Incompatible world model checkpoint: missing={missing}, unexpected={unexpected}')
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(ck["critic"])
         self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
+        if self.wm_trainer.collision_opt is not None and ck.get('collision_opt') is not None:
+            self.wm_trainer.collision_opt.load_state_dict(ck['collision_opt'])
         self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
         self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
         self.command.bin_return.copy_(ck["bin_return"])
@@ -161,6 +233,7 @@ class Trainer:
         finished_returns: list[float] = []
         finished_lens: list[float] = []
         last_log = time.time()
+        collision_ready = self.wm.collision_head is None
 
         while self.iteration < sch.total_iterations:
             # ---------------- (1) collect one vectorised env step
@@ -195,8 +268,15 @@ class Trainer:
                     torch.cuda.synchronize()
                     timers["wm"] += time.perf_counter() - t0
                     t0 = time.perf_counter()
-                    for _ in range(sch.policy_updates_per_wm_update):
-                        m_pi = self.policy_trainer.update(self.buffer)
+                    m_pi = {}
+                    # Learn the new sensor predictor before its gradients affect the actor.
+                    collision_ready = (collision_ready or self.wm.collision_head is None or (
+                        self.iteration - self.start_iteration >= 1000
+                        and m_wm.get('collision_positive_count', 0) >= 10
+                        and m_wm.get('collision_recall', 0) >= 0.5))
+                    if collision_ready:
+                        for _ in range(sch.policy_updates_per_wm_update):
+                            m_pi = self.policy_trainer.update(self.buffer)
                     torch.cuda.synchronize()
                     timers["policy"] += time.perf_counter() - t0
                     self.num_updates += 1
@@ -257,6 +337,11 @@ class Trainer:
                         f"imag_ret {agg.get('policy/imag_return_undisc', float('nan'))/max(agg_n,1):.3f} surv {agg.get('policy/imag_survival_H', float('nan'))/max(agg_n,1):.3f} | "
                         f"t sim/wm/pi {timers['sim']:.1f}/{timers['wm']:.1f}/{timers['policy']:.1f}s"
                     )
+                    if self.wm.collision_head is not None:
+                        msg += (f" | collision target/pred {agg.get('wm/collision_target', 0)/max(agg_n,1):.4f}/"
+                                f"{agg.get('wm/collision_prediction', 0)/max(agg_n,1):.4f}"
+                                f" recall {agg.get('wm/collision_recall', 0)/max(agg_n,1):.3f}"
+                                f" policy_ready {collision_ready}")
                     print(msg, flush=True)
                 agg, agg_n = {}, 0
                 finished_returns, finished_lens = [], []
@@ -264,6 +349,9 @@ class Trainer:
             if self.iteration % sch.checkpoint_interval == 0:
                 self.save("ckpt_latest.pt")
                 self.save(f"ckpt_{self.iteration:07d}.pt")
+            if self.wm.collision_head is not None and self.iteration - self.start_iteration >= 3000 and not collision_ready:
+                print('[ERROR] Contact predictor did not reach the readiness threshold; stopping before policy updates.', flush=True)
+                break
             if sch.max_hours is not None and self.iteration % sch.log_interval == 0:
                 stop = float((time.time() - t_start) / 3600 > sch.max_hours)
                 if self.world > 1:

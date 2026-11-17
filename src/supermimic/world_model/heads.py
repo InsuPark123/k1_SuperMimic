@@ -130,6 +130,10 @@ class AnalyticHeads:
             joint_pos=s_next[..., 7:NQ],
             soft_limits=self.soft_limits,
             cfg=self.reward_cfg,
+            robot_root_pos_w=s_next[..., :3],
+            robot_root_quat_w=s_next[..., 3:7],
+            ref_root_pos_w=ref.root_pos_w,
+            ref_root_quat_w=ref.root_quat_w,
         )
 
     @staticmethod

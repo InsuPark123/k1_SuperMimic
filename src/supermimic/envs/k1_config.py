@@ -39,12 +39,11 @@ assert K1_REV1_XML_PATH.is_file()
 
 K1_REV1_FOOT_SITE_NAMES = ("left_foot", "right_foot")
 K1_REV1_FOOT_COLLISION_GEOM_NAMES = tuple(
-  f"{side}_ankle_roll_link_collision_{index}"
+  f"{side}_ankle_roll_link_collision_mesh"
   for side in ("left", "right")
-  for index in range(9)
 )
 K1_REV1_FOOT_COLLISION_GEOM_PATTERN = (
-  r"^(left|right)_ankle_roll_link_collision_[0-8]$"
+  r"^(left|right)_ankle_roll_link_collision_mesh$"
 )
 
 NATURAL_FREQ = 10.0 * 2.0 * math.pi
@@ -176,6 +175,24 @@ K1_REV1_ARTICULATION_CFG = EntityArticulationInfoCfg(
 def _load_k1_rev1_spec() -> mujoco.MjSpec:
   """Load the upstream K1 MJCF and add MJLab runtime-only elements."""
   spec = mujoco.MjSpec.from_file(str(K1_REV1_XML_PATH))
+
+  # Replace the nine point-contact spheres per foot with the matching K1 foot
+  # mesh. Keep self-collision enabled and preserve the link's explicit inertia.
+  for side in ("left", "right"):
+    for index in range(9):
+      spec.delete(spec.geom(f"{side}_ankle_roll_link_collision_{index}"))
+    spec.body(f"{side}_ankle_roll_link").add_geom(
+      name=f"{side}_ankle_roll_link_collision_mesh",
+      type=mujoco.mjtGeom.mjGEOM_MESH,
+      meshname=f"{side}_ankle_roll_link",
+      contype=1,
+      conaffinity=1,
+      condim=3,
+      priority=1,
+      friction=(0.6, 0.005, 0.0001),
+      density=0,
+      group=3,
+    )
 
   # MJLab supplies position actuators below. Drop the upstream torque motors
   # so the robot still exposes exactly the 23 policy-controlled actuators.

@@ -60,7 +60,7 @@ def main(ckpt: Path, npz_dir: Path = Path('data/npz/lafan1'),
         future_frames=config['env']['future_frames'], episode_length_s=1e5,
         action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False,
         sampling_mode='start', record_transitions=False, seed=seed,
-        anchor_obs=config['env'].get('anchor_obs', False))
+        anchor_obs=config['env'].get('anchor_obs', False), anchor_ori_obs=config['env'].get('anchor_ori_obs', False))
     scenarios = ['baseline', 'friction_0.3', 'friction_0.1', 'gyro_noise', 'gyro_bias', 'density_0.8', 'density_1.2']
     results = []
     configure_torch_backends()

@@ -9,6 +9,7 @@ from supermimic.imagination.policy_trainer import PolicyTrainerCfg
 from supermimic.policy.nets import CriticCfg, PolicyCfg
 from supermimic.world_model.wm_trainer import WMTrainerCfg
 from supermimic.world_model.world_model import WorldModelCfg
+from supermimic.robot import ROBOT
 
 
 @dataclass
@@ -28,11 +29,25 @@ class EnvCfg:
     obs_noise: bool = True
     reset_noise: bool = True
     domain_randomization: bool = True
+    encoder_bias_range: float = 0.07 if ROBOT == "k1" else 0.01
+    encoder_bias_other_range: float = 0.01
+    k1_system_id_dr: bool = ROBOT == 'k1'
+    k1_legacy_friction_delay_dr: bool = False
+    motor_delay_dr: bool = False
+    self_collision_weight: float = 0.0  # Negative enables K1 self-contact penalty.
+    extended_dr_context: bool = False  # Include system-ID parameters and previous action in xi.
     sampling_mode: str = "return"
     replay_capacity: int = 1000
     future_frames: int = 10
     compact_library: bool = False
     anchor_obs: bool = False
+    anchor_ori_obs: bool = False  # Reference-relative torso orientation without position.
+    imu_pitch_offset_deg: float = 0.0  # Symmetric, fixed per episode; 0 disables.
+    imu_roll_offset_deg: float = 0.0
+    base_xy_weight: float = 0.0
+    base_yaw_weight: float = 0.0
+    base_xy_std: float = 0.3
+    base_yaw_std: float = 0.4
 
 
 @dataclass

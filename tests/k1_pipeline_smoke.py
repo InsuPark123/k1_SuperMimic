@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 
 import mujoco
@@ -11,20 +12,26 @@ from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BOD
 from supermimic.imagination.policy_trainer import PolicyTrainer, PolicyTrainerCfg
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, CriticCfg, Policy, PolicyCfg
-from supermimic.world_model.heads import AnalyticHeads
+from supermimic.world_model.heads import AnalyticHeads, anchor_relative_obs
 from supermimic.world_model.wm_trainer import WMTrainerCfg, WorldModelTrainer
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
 
 out = Path(sys.argv[1])
+orientation_only = os.environ.get('SUPERMIMIC_TEST_ORIENTATION_ONLY') == '1'
 raw = np.zeros((40, 30)); raw[:, 2] = .78; raw[:, 6] = 1
 np.savetxt(out / 'motion.csv', raw, delimiter=',')
 convert_csv_to_npz(out / 'motion.csv', out / 'motion.npz', 50)
-a=SuperMimicEnvCfgArgs(npz_files=[str(out / 'motion.npz')], num_envs=2,obs_noise=False,reset_noise=False,domain_randomization=True,replay_capacity=50)
+a=SuperMimicEnvCfgArgs(npz_files=[str(out / 'motion.npz')], num_envs=2,obs_noise=False,reset_noise=False,domain_randomization=True,replay_capacity=50,anchor_ori_obs=orientation_only)
 env=make_env(a,device='cpu')
 assert env.sim.mj_model.opt.integrator == mujoco.mjtIntegrator.mjINT_IMPLICITFAST
 robot=env.scene['robot']
 assert tuple(robot.joint_names)==K1_JOINT_NAMES, (robot.joint_names,K1_JOINT_NAMES)
 obs,_=env.reset()
+if orientation_only:
+ assert obs['goal'].shape == (2, 566)
+ motion = env.command_manager.get_term('motion')
+ expected = anchor_relative_obs(motion.robot_anchor_pos_w, motion.robot_anchor_quat_w, motion.anchor_pos_w, motion.anchor_quat_w)
+ assert torch.allclose(obs['goal'][:, -6:], expected[:, 3:], atol=1e-5)
 for i in range(20):
  obs,r,term,tout,extra=env.step(torch.zeros(2,23))
 cmd=env.command_manager.get_term('motion')
@@ -43,10 +50,10 @@ wmt=WorldModelTrainer(wm,cmd.library,WMTrainerCfg(batch_size=2,batches_per_updat
 metrics = wmt.update(buffer)
 assert np.isfinite(metrics['loss'])
 print('WORLD_MODEL_UPDATE', metrics['loss'])
-pc=PolicyCfg(encoder_hidden=(16,),decoder_hidden=(16,))
+pc=PolicyCfg(encoder_hidden=(16,),decoder_hidden=(16,),goal_dim=566 if orientation_only else 560)
 policy=Policy(pc)
 critic=Critic(CriticCfg(hidden=(16,)),pcfg=pc)
-pt=PolicyTrainer(wm,policy,critic,cmd.library,PolicyTrainerCfg(batch_size=2,horizon=2,critic_epochs=1,critic_minibatches=1,compile=None,obs_noise=False))
+pt=PolicyTrainer(wm,policy,critic,cmd.library,PolicyTrainerCfg(batch_size=2,horizon=2,critic_epochs=1,critic_minibatches=1,compile=None,obs_noise=False,anchor_ori_obs=orientation_only))
 metrics = pt.update(buffer)
 assert np.isfinite(metrics['critic_loss']) and np.isfinite(metrics['policy_grad_norm'])
 print('POLICY_UPDATE', metrics['critic_loss'])
@@ -62,6 +69,7 @@ cfg.device = 'cpu'
 cfg.data.npz_dir = out
 cfg.log_root = out / 'logs'
 cfg.env.num_envs = 2
+cfg.env.anchor_ori_obs = orientation_only
 cfg.env.replay_capacity = 50
 cfg.schedule.total_iterations = 13
 cfg.schedule.warmup_iterations = 9
@@ -83,7 +91,11 @@ cfg.policy_trainer.critic_minibatches = 1
 cfg.policy_trainer.compile = None
 torch.cuda.synchronize = lambda: None
 trainer = Trainer(cfg)
+assert (out / 'logs/debug/params/sim2real.yaml').is_file()
+assert (out / 'logs/debug/params/motion.csv').is_file()
 trainer.run()
 checkpoint = torch.load(out / 'logs/debug/ckpt_latest.pt', map_location='cpu', weights_only=False)
 assert checkpoint['robot'] == 'k1' and checkpoint['num_updates'] > 0
+if orientation_only:
+ assert checkpoint['config']['policy']['goal_dim'] == 566
 print('FULL_TRAINER_LOOP', checkpoint['num_updates'])

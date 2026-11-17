@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import math
 
-from supermimic.robot import NJ
+from supermimic.robot import NJ, XI_DIM
+from supermimic.envs.mdp.observations import tilt_biased_gravity, tilt_biased_torso_quat
 from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.compiled import REWARD_TERM_NAMES, ImagStep
@@ -31,6 +33,7 @@ class ImagRollout:
     e_root: torch.Tensor  # (H+1, n, 4)
     frames: torch.Tensor  # (H+1, n)
     reward_terms: dict  # mean of each reward term over the rollout (diagnostics)
+    contexts: torch.Tensor  # (H+1, N, xi_dim), including previous executed action
 
 
 def imagine(
@@ -43,7 +46,12 @@ def imagine(
     obs_noise: bool = True,
     step_fn: ImagStep | None = None,
     anchor_obs: bool = False,
+    anchor_ori_obs: bool = False,
+    imu_pitch_offset_deg: float = 0.0,
+    imu_roll_offset_deg: float = 0.0,
 ) -> ImagRollout:
+    if anchor_obs and anchor_ori_obs:
+        raise ValueError('anchor_obs and anchor_ori_obs are mutually exclusive')
     device = start.state.device
     n = start.state.shape[0]
     q0 = lib.default_joint_pos
@@ -51,24 +59,36 @@ def imagine(
     noise_half = OBS_NOISE_HALF.to(device)
     anchor_noise_half = ANCHOR_NOISE_HALF.to(device)
     ai = wm.heads.anchor_index
+    use_tilt = bool(imu_pitch_offset_deg or imu_roll_offset_deg)
+    pitch = (torch.rand(n, device=device) * 2 - 1) * math.radians(imu_pitch_offset_deg) if use_tilt else None
+    roll = (torch.rand(n, device=device) * 2 - 1) * math.radians(imu_roll_offset_deg) if use_tilt else None
 
     def add_noise(o):
+        if pitch is not None:
+            start_gravity = 2 * NJ + 3
+            o = torch.cat((o[..., :start_gravity], tilt_biased_gravity(o[..., start_gravity:start_gravity + 3], roll, pitch), o[..., start_gravity + 3:]), dim=-1)
         if obs_noise:
             return o + (torch.rand_like(o) * 2 - 1) * noise_half
         return o
 
-    def make_goal(frame_t, ref_t, anchor_pose):
+    def make_goal(frame_t, ref_t, anchor_pose, state):
         g = lib.goal_window(frame_t, future_frames)
-        if not anchor_obs:
+        if not (anchor_obs or anchor_ori_obs):
             return g
-        rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_pose[..., 3:7], ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
+        anchor_quat = anchor_pose[..., 3:7]
+        if pitch is not None:
+            anchor_quat = tilt_biased_torso_quat(anchor_quat, roll, pitch)
+        rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_quat, ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
         if obs_noise:
             rel = rel + (torch.rand_like(rel) * 2 - 1) * anchor_noise_half
+        if anchor_ori_obs:
+            rel = rel[..., 3:]
         return torch.cat([g, rel], dim=-1)
 
     # Initial observation history from the logged states/actions (noise re-sampled per frame).
     hist = [add_noise(analytic_observation(start.hist_states[i], start.hist_actions[i], start.xi, q0)) for i in range(start.hist_states.shape[0])]
     s = start.state
+    xi = start.xi
     frame = start.frame.clone()
     a_prev = start.prev_action
     c = torch.ones(n, device=device)
@@ -87,19 +107,20 @@ def imagine(
         return ReferenceFrame(ref_all.body_pos_w[sl], ref_all.body_quat_w[sl], ref_all.body_lin_vel_w[sl], ref_all.body_ang_vel_w[sl], ref_all.root_pos_w[sl], ref_all.root_quat_w[sl])
 
     ref = ref_at(0)
-    if anchor_obs:
+    if anchor_obs or anchor_ori_obs:
         b0 = wm.heads.robot_bodies(s)
         anchor_pose = torch.cat([b0["pos"][..., ai, :], b0["quat"][..., ai, :]], dim=-1)
     else:
         anchor_pose = None
-    goals = [make_goal(frame, ref, anchor_pose)]
+    goals = [make_goal(frame, ref, anchor_pose, s)]
     e_roots = [wm.heads.root_error_features(s, ref)]
     term_sum = torch.zeros(len(REWARD_TERM_NAMES), device=device)
+    contexts = [xi]
 
     for t in range(horizon):
         obs_flat = flatten_history_term_major(torch.stack(hist, 0))
         a = policy(obs_flat, goals[-1])
-        s_next, r, term_vec, logits, obs_clean, anchor_pose = step_fn(s, a, a_prev, start.xi, ref)
+        s_next, r, term_vec, logits, obs_clean, anchor_pose = step_fn(s, a, a_prev, xi, ref)
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)
@@ -109,12 +130,15 @@ def imagine(
         hist = hist[1:] + [add_noise(obs_clean)]
         a_prev = a
         s = s_next
+        if xi.shape[-1] > XI_DIM:
+            xi = torch.cat((xi[..., :-NJ], a), dim=-1)
+        contexts.append(xi)
         states.append(s)
         actions.append(a)
         rewards.append(r)
         dhats.append(d)
         survivals.append(c)
-        goals.append(make_goal(frame, ref, anchor_pose))
+        goals.append(make_goal(frame, ref, anchor_pose, s))
         e_roots.append(wm.heads.root_error_features(s, ref))
         frames.append(frame)
 
@@ -128,4 +152,5 @@ def imagine(
         e_root=torch.stack(e_roots),
         frames=torch.stack(frames),
         reward_terms={k: float(v / horizon) for k, v in zip(REWARD_TERM_NAMES, term_sum.tolist())},
+        contexts=torch.stack(contexts),
     )

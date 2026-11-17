@@ -35,12 +35,16 @@ class WorldModelTrainer:
         self.wm = wm
         self.lib = lib
         self.cfg = cfg
-        self.opt = torch.optim.Adam(wm.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        self.opt = torch.optim.Adam((p for n, p in wm.named_parameters() if not n.startswith('collision_head.')), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        self.collision_opt = torch.optim.Adam(wm.collision_head.parameters(), lr=cfg.lr) if wm.collision_head is not None else None
         wm.enable_compile(cfg.compile)
 
     def set_lr(self, lr: float) -> None:
         for g in self.opt.param_groups:
             g["lr"] = lr
+        if self.collision_opt is not None:
+            for g in self.collision_opt.param_groups:
+                g['lr'] = lr
 
     def loss_on(self, w: WindowBatch):
         k, n = w.frame.shape
@@ -59,6 +63,23 @@ class WorldModelTrainer:
             allreduce_grads(self.wm)
             gn = torch.nn.utils.clip_grad_norm_(self.wm.parameters(), self.cfg.grad_clip)
             self.opt.step()
+            if self.collision_opt is not None:
+                # Sensor labels are measured over four physics substeps; prediction is a
+                # differentiable approximation conditioned on the observed next state.
+                target = w.self_collision.reshape(-1) / 4.0
+                predicted = self.wm.collision_cost(w.states[1:].reshape(-1, w.states.shape[-1])) / 4.0
+                collision_loss = torch.nn.functional.binary_cross_entropy(predicted, target)
+                self.collision_opt.zero_grad(set_to_none=True)
+                collision_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.wm.collision_head.parameters(), self.cfg.grad_clip)
+                self.collision_opt.step()
+                self.collision_opt.zero_grad(set_to_none=True)
+                m['collision_bce'] = collision_loss.detach()
+                m['collision_target'] = target.mean().detach()
+                m['collision_prediction'] = predicted.mean().detach()
+                positive = target > 0
+                m['collision_positive_count'] = positive.sum().detach()
+                m['collision_recall'] = ((predicted > 0.1) & positive).sum().detach() / positive.sum().clamp(min=1)
             m["loss"] = loss.detach()
             m["grad_norm"] = gn.detach()
             for k, v in m.items():

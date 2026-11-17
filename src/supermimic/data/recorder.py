@@ -32,13 +32,13 @@ class ReplayRecorder(RecorderTerm):
         super().__init__(cfg, env)
         p = cfg.params
         self.state_io = StateIO(env)
-        self.ctx = SimContext(env, p["foot_geom_regex"], p.get("com_body_name", "torso_link"))
+        self.ctx = SimContext(env, p["foot_geom_regex"], p.get("com_body_name", "torso_link"), extended=p.get('extended_dr', False))
         self.command_name = p.get("command_name", "motion")
         self.action_name = p.get("action_name", "joint_pos")
         n = env.num_envs
-        self.buffer = ReplayBuffer(n, int(p["capacity"]), STATE_DIM, NJ, XI_DIM, env.device)
+        self.buffer = ReplayBuffer(n, int(p["capacity"]), STATE_DIM, NJ, self.ctx.dim, env.device)
         self.prev_s = torch.zeros(n, STATE_DIM, device=env.device)
-        self.prev_xi = torch.zeros(n, XI_DIM, device=env.device)
+        self.prev_xi = torch.zeros(n, self.ctx.dim, device=env.device)
         self.prev_frame = torch.zeros(n, dtype=torch.long, device=env.device)
         self.prev_clip = torch.zeros(n, dtype=torch.long, device=env.device)
         self.ep_start = torch.ones(n, dtype=torch.bool, device=env.device)
@@ -68,6 +68,10 @@ class ReplayRecorder(RecorderTerm):
 
     def _write_rows(self, ids: torch.Tensor, done_next: torch.Tensor) -> None:
         env = self._env
+        collision = None
+        if 'self_collision' in env.reward_manager.active_terms:
+            weight = env.reward_manager.get_term_cfg('self_collision').weight
+            collision = env.reward_manager.get_term('self_collision')[ids] / (weight * env.step_dt)
         self.buffer.add(
             ids,
             s=self.prev_s[ids],
@@ -80,6 +84,7 @@ class ReplayRecorder(RecorderTerm):
             clip=self.prev_clip[ids],
             terminal=torch.zeros_like(done_next, dtype=torch.bool),
             ep_start=self.ep_start[ids],
+            self_collision=collision,
         )
         self.ep_start[ids] = False
 

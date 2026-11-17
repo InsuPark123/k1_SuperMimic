@@ -13,6 +13,8 @@ dependencies = [
   "mujoco-warp~=3.16.0",
   "mujoco~=3.16.0",
   "numpy",
+  "onnx>=1.16",
+  "pyyaml>=6.0",
   "scipy>=1.15",
   "tensorboard>=2.20.0",
   "tyro>=1.0.1",

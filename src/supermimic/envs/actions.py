@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 import torch
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
+from mjlab.envs.mdp import dr
+from mjlab.managers.event_manager import requires_model_fields
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -53,3 +55,30 @@ class NoisyJointPositionActionCfg(JointPositionActionCfg):
 
     def build(self, env: ManagerBasedRlEnv) -> NoisyJointPositionAction:
         return NoisyJointPositionAction(self, env)
+
+
+def reset_motor_delay(env, env_ids):
+    """Draw a shared 0–4 physics-step delay per environment and hold it for the episode."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    if not hasattr(env, 'motor_delay_lag'):
+        env.motor_delay_lag = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+    lags = torch.randint(0, 5, (len(env_ids),), device=env.device)
+    env.motor_delay_lag[env_ids] = lags
+    for actuator in env.scene['robot'].actuators:
+        actuator.set_lags(lags, env_ids)
+
+
+@requires_model_fields('actuator_forcerange', 'jnt_actfrcrange', 'tendon_actfrcrange', 'actuator_gainprm', 'actuator_biasprm')
+def randomize_motor_output(env, env_ids, effort_limit_range, asset_cfg):
+    """Scale the entire PD output and its torque cap by the same per-motor factor."""
+    dr.effort_limits(env, env_ids, effort_limit_range, asset_cfg=asset_cfg, operation='scale')
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    default_force = env.sim.get_default_field('actuator_forcerange')
+    for actuator in env.scene[asset_cfg.name].actuators:
+        ids = actuator.global_ctrl_ids
+        factor = env.sim.model.actuator_forcerange[env_ids[:, None], ids, 1] / default_force[ids, 1]
+        env.sim.model.actuator_gainprm[env_ids[:, None], ids, 0] *= factor
+        env.sim.model.actuator_biasprm[env_ids[:, None], ids, 1] *= factor
+        env.sim.model.actuator_biasprm[env_ids[:, None], ids, 2] *= factor

@@ -28,11 +28,12 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path = Path("data/npz/bones_seed
     missing = set(clips) - {Path(f).stem for f in files}
     assert not missing, f"clips not found in {npz_dir}: {sorted(missing)}"
     policy, cfg = load_policy_from_checkpoint(ckpt, device)
+    reward_args = {k: cfg['env'][k] for k in ('base_xy_weight', 'base_yaw_weight', 'base_xy_std', 'base_yaw_std') if k in cfg['env']}
     n = len(files)
     args = SuperMimicEnvCfgArgs(
         npz_files=files, num_envs=n, future_frames=cfg["env"]["future_frames"], episode_length_s=1.0e5,
         action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, sampling_mode="start",
-        record_transitions=False, seed=0, anchor_obs=cfg["env"].get("anchor_obs", False),
+        record_transitions=False, seed=0, anchor_obs=cfg["env"].get("anchor_obs", False), anchor_ori_obs=cfg["env"].get("anchor_ori_obs", False), **reward_args,
     )
     env = make_env(args, device=device)
     try:
@@ -43,7 +44,7 @@ def main(ckpt: Path, clips: list[str], npz_dir: Path = Path("data/npz/bones_seed
         cmd.forced_frame[:] = lib.clip_start[env_clip]
         obs, _ = env.reset()
         cmd.forced_frame[:] = lib.clip_start[env_clip]  # keep the clip if an env is reset again
-        max_r = 0.1  # paper reward upper bound per step (dt * 5)
+        max_r = env.step_dt * (5.0 + reward_args.get('base_xy_weight', 0.0) + reward_args.get('base_yaw_weight', 0.0))
         rob, ref = [], []
         alive = torch.ones(n, dtype=torch.bool, device=device)
         rew_sum = torch.zeros(n, device=device)

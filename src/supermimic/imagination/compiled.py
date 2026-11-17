@@ -22,6 +22,9 @@ REWARD_TERM_NAMES = (
     "motion_body_ang_vel",
     "action_rate_l2",
     "joint_limit",
+    "base_xy",
+    "base_yaw",
+    "self_collision",
 )
 
 
@@ -39,6 +42,8 @@ class ImagStep:
         s_next = self.wm.step(s, a, xi)
         bodies = self.wm.heads.robot_bodies(s_next)
         terms = self.wm.heads.reward(s_next, a, a_prev, ref, bodies)
+        terms['self_collision'] = self.wm.heads.reward_cfg.dt * self.wm.self_collision_weight * self.wm.collision_cost(s_next)
+        terms['total'] = terms['total'] + terms['self_collision']
         r = terms["total"]
         term_vec = torch.stack([terms[k] for k in REWARD_TERM_NAMES], dim=0)  # (8, n)
         logits = self.wm.termination_logits(s_next, ref)

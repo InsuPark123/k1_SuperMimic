@@ -44,7 +44,7 @@ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, 
 
 
 @torch.no_grad()
-def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False) -> list[ClipResult]:
+def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", num_envs: int | None = None, future_frames: int = 10, verbose: bool = True, anchor_obs: bool = False, base_xy_weight: float = 0.0, base_yaw_weight: float = 0.0, base_xy_std: float = 0.3, base_yaw_std: float = 0.4, anchor_ori_obs: bool = False) -> list[ClipResult]:
     num_envs = min(num_envs or 1024, len(npz_files))
     args = SuperMimicEnvCfgArgs(
         npz_files=npz_files,
@@ -59,13 +59,16 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0", 
         record_transitions=False,
         seed=0,
         anchor_obs=anchor_obs,
+        anchor_ori_obs=anchor_ori_obs,
+        base_xy_weight=base_xy_weight, base_yaw_weight=base_yaw_weight,
+        base_xy_std=base_xy_std, base_yaw_std=base_yaw_std,
     )
     env = make_env(args, device=device)
     try:
         cmd = env.command_manager.get_term("motion")
         lib = cmd.library
         n_clips = lib.num_clips
-        max_r = 0.1  # paper reward upper bound per step (dt * 5)
+        max_r = env.step_dt * (5.0 + base_xy_weight + base_yaw_weight)
 
         # Clip queue: env e plays clips e, e+N, e+2N, ...
         current = torch.arange(num_envs, device=device)

@@ -39,14 +39,23 @@ class TerminationHead(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, cfg: WorldModelCfg, heads: AnalyticHeads, device):
+    def __init__(self, cfg: WorldModelCfg, heads: AnalyticHeads, device, self_collision_weight: float = 0.0):
         super().__init__()
         self.cfg = cfg
         self.spec = StateSpec(cfg.state_spec, device)
-        self.dynamics = DynamicsMLP(feat_dim=STATE_DIM, act_dim=NJ, xi_dim=XI_DIM, out_dim=12+2*NJ, hidden=cfg.hidden)
+        self.dynamics = DynamicsMLP(feat_dim=STATE_DIM, act_dim=NJ, xi_dim=len(cfg.state_spec.xi_scale), out_dim=12+2*NJ, hidden=cfg.hidden)
         self.term_head = TerminationHead(cfg.term_hidden, cfg.height_threshold, cfg.tilt_threshold)
         self.heads = heads  # analytic observation / reward / FK (no parameters)
+        self.self_collision_weight = self_collision_weight
+        self.collision_head = MLP(STATE_DIM, (256, 256), 1) if self_collision_weight else None
+        if self.collision_head is not None:
+            nn.init.constant_(self.collision_head.net[-1].bias, -3.0)
         self.to(device)
+
+    def collision_cost(self, s: torch.Tensor) -> torch.Tensor:
+        if self.collision_head is None:
+            return s[..., 0] * 0.0
+        return 4.0 * torch.sigmoid(self.collision_head(self.spec.canonical(s)).squeeze(-1))
 
     # ------------------------------------------------------------------ one step
 
@@ -92,6 +101,8 @@ class WorldModel(nn.Module):
         acc_num = 0.0
         step_fn = getattr(self, "_loss_step_fn", None) or self._loss_step
         for j in range(k):
+            if xi.shape[-1] > XI_DIM and j:
+                xi = torch.cat((xi[..., :-NJ], a_exec[j - 1]), dim=-1)
             s, sq, bce, logits = step_fn(s, a_exec[j], xi, states[j + 1], done[j], refs[j].root_pos_w, refs[j].root_quat_w)
             total_state = total_state + sq.sum(-1).mean()
             total_term = total_term + bce.mean()
@@ -122,6 +133,8 @@ class WorldModel(nn.Module):
         s = states[0]
         out = []
         for j in range(k):
+            if xi.shape[-1] > XI_DIM and j:
+                xi = torch.cat((xi[..., :-NJ], a_exec[j - 1]), dim=-1)
             s = self.step(s, a_exec[j], xi)
             out.append(self.spec.normalized_sq_error(s, states[j + 1]).mean())
         return torch.stack(out)

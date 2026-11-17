@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 import torch
 from mjlab.utils.lab_api.math import quat_apply, quat_box_minus, quat_inv, quat_mul, yaw_quat
+from supermimic.kinematics.rotations import heading_yaw, wrap_to_pi
 
 
 @dataclass
@@ -34,13 +35,33 @@ class TrackingRewardCfg:
     w_body_ang_vel: float = 1.0
     w_root_pos: float = 0.5
     w_root_ori: float = 0.5
+    w_base_xy: float = 0.0
+    w_base_yaw: float = 0.0
+    std_base_xy: float = 0.3
+    std_base_yaw: float = 0.4
     w_action_rate: float = -0.1
     w_joint_limit: float = -2.0
     dt: float = 0.02
 
     @property
     def max_step_reward(self) -> float:
-        return self.dt * (self.w_body_pos + self.w_body_ori + self.w_body_lin_vel + self.w_body_ang_vel + self.w_root_pos + self.w_root_ori)
+        return self.dt * (self.w_body_pos + self.w_body_ori + self.w_body_lin_vel + self.w_body_ang_vel + self.w_root_pos + self.w_root_ori + self.w_base_xy + self.w_base_yaw)
+
+
+def base_tracking_rewards(pos, quat, ref_pos, ref_quat, xy_std, yaw_std):
+    xy_error = ((pos[..., :2] - ref_pos[..., :2]) ** 2).sum(-1)
+    yaw_error = wrap_to_pi(heading_yaw(quat) - heading_yaw(ref_quat))
+    return torch.exp(-xy_error / xy_std**2), torch.exp(-yaw_error.square() / yaw_std**2)
+
+
+def base_xy_reward(env, command_name: str, std: float):
+    cmd = env.command_manager.get_term(command_name)
+    return base_tracking_rewards(cmd.robot_root_pos_w, cmd.robot_root_quat_w, cmd.root_pos_w, cmd.root_quat_w, std, 1.0)[0]
+
+
+def base_yaw_reward(env, command_name: str, std: float):
+    cmd = env.command_manager.get_term(command_name)
+    return base_tracking_rewards(cmd.robot_root_pos_w, cmd.robot_root_quat_w, cmd.root_pos_w, cmd.root_quat_w, 1.0, std)[1]
 
 
 def reanchor_reference(
@@ -88,6 +109,10 @@ def tracking_reward_terms(
     joint_pos: torch.Tensor,
     soft_limits: torch.Tensor,  # (29, 2) or (N, 29, 2)
     cfg: TrackingRewardCfg,
+    robot_root_pos_w: torch.Tensor | None = None,
+    robot_root_quat_w: torch.Tensor | None = None,
+    ref_root_pos_w: torch.Tensor | None = None,
+    ref_root_quat_w: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Per-term weighted, dt-scaled rewards (N,) plus 'total'."""
     ra_pos = robot_body_pos_w[..., anchor_index, :]
@@ -120,6 +145,15 @@ def tracking_reward_terms(
         "action_rate_l2": dt * cfg.w_action_rate * action_rate,
         "joint_limit": dt * cfg.w_joint_limit * joint_limit,
     }
+    if cfg.w_base_xy or cfg.w_base_yaw:
+        assert robot_root_pos_w is not None and robot_root_quat_w is not None
+        assert ref_root_pos_w is not None and ref_root_quat_w is not None
+        xy, yaw = base_tracking_rewards(robot_root_pos_w, robot_root_quat_w, ref_root_pos_w, ref_root_quat_w, cfg.std_base_xy, cfg.std_base_yaw)
+        terms['base_xy'] = dt * cfg.w_base_xy * xy
+        terms['base_yaw'] = dt * cfg.w_base_yaw * yaw
+    else:
+        terms['base_xy'] = torch.zeros_like(e_root_pos)
+        terms['base_yaw'] = torch.zeros_like(e_root_pos)
     total = terms["motion_global_root_pos"]
     for k, v in terms.items():
         if k != "motion_global_root_pos":
